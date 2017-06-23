@@ -1,0 +1,165 @@
+# To login to Azure Resource Manager
+Login-AzureRmAccount
+
+## Get all Azure location
+Get-AzureRmLocation | sort Location | Select Location
+
+## Connect to your Azure subscription
+Add-AzureRMAccount
+Get-AzureRMSubscription
+
+## Define variables
+{
+$ResourceGroupName = "AzureLab-ARM-IaaS"
+$ResourceGroupLocation = "North Europe"
+
+$randomString = ([char[]]([char]'a'..[char]'z') + 0..9 | Sort-Object {Get-Random})[0..3] -join ''
+$storageAccountNamePrefix = 'storage'
+$StorageAccountType = "Standard_GRS"
+$StorageAccountName = $storageAccountNamePrefix + ($storageAccountType.Replace('Standard_','')).ToLower() + $randomString
+
+$vNetName = 'AzureLab-ARM-PaaS-vNet'
+$vNetAddressPrefix = '10.0.0.0/8'
+$vNetSubnet1Name = 'vNet-Subnet-Infraknowledge'
+$vNetSubnet1Prefix = '10.0.10.0/24'
+$vNetSubnet2Name = 'vNet-Subnet-BringYouToTheCloud'
+$vNetSubnet2Prefix = '10.0.20.0/24'
+
+$IPName = 'Public-IP-VM01'
+$NICName = 'vNIC-VM01'
+
+$AzureVMName = 'AzureLab-ARM-IaaS-VM01'
+$AzureComputerName = 'AZVMW2K16VM-01' ## Max. 15 charaters
+}
+
+## Create a new Resource Group
+{
+$resourceGroup = New-AzureRmResourceGroup `
+    -Name $resourceGroupName `
+    -Location $resourceGroupLocation
+}
+
+## Create a new Storage Account
+if(!$checkdisk.NameAvailable)
+{
+    #$checkdisk = False
+    Write-Host $checkdisk.Reason
+    $var = Read-Host "Geef een niet "
+}
+
+$checkdisk = Get-AzureRmStorageAccountNameAvailability $StorageAccountName.StorageAccountName ## Storage Account availability check
+{
+$StorageAccount = New-AzureRmStorageAccount `
+    -ResourceGroupName $ResourceGroup.ResourceGroupName `
+    -Name $StorageAccountName `
+    -Location $ResourceGroup.Location `
+    -SkuName $StorageAccountType
+}
+
+## Create new virtual subnets
+{
+$vNetSubnet1 = New-AzureRmVirtualNetworkSubnetConfig `
+    -Name $vNetSubnet1Name `
+    -AddressPrefix $vNetSubnet1Prefix
+
+$vNetSubnet2 = New-AzureRmVirtualNetworkSubnetConfig `
+    -Name $vNetSubnet2Name `
+    -AddressPrefix $vNetSubnet2Prefix
+}
+
+## Create a Virtual Network
+{
+$vNet = New-AzureRmVirtualNetwork `
+    -ResourceGroupName $ResourceGroup.ResourceGroupName `
+    -Location $ResourceGroup.Location `
+    -Name $vNetName `
+    -AddressPrefix $vNetAddressPrefix `
+    -Subnet $vNetSubnet1,$vNetSubnet2
+}
+
+## Create Public IP
+{
+$pip = New-AzureRmPublicIpAddress `
+    -Name $IPName `
+    -ResourceGroupName $ResourceGroup.ResourceGroupName `
+    -Location $ResourceGroup.Location `
+    -AllocationMethod Static
+
+$nic = New-AzureRmNetworkInterface `
+    -Name $NICName `
+    -ResourceGroupName $ResourceGroup.ResourceGroupName `
+    -Location $ResourceGroup.Location `
+    -SubnetId $vNet.Subnets[0].Id `
+    -PublicIpAddressId $pip.Id
+}
+
+## Create a new vMachine
+{
+$AzureCred = Get-Credential `
+    -Message "Type the name and password of the local administrator account within Azure."
+
+Get-AzureRmVMSize -Location $resourceGroup.Location | sort Name | Select Name ## Get Azure VM sizes
+
+$AzureVM = New-AzureRmVMConfig `
+    -VMName $AzureVMName `
+    -VMSize "Standard_DS2_v2"
+
+$AzureVM = Set-AzureRmVMOperatingSystem `
+    -VM $AzureVM `
+    -Windows `
+    -ComputerName "IaaS-VM01" `
+    -Credential $AzureCred `
+    -ProvisionVMAgent `
+    -EnableAutoUpdate
+
+$AzureVM = Set-AzureRmVMSourceImage `
+    -VM $AzureVM `
+    -PublisherName MicrosoftWindowsServer `
+    -Offer WindowsServer `
+    -Skus 2016-Datacenter `
+    -Version "latest"
+
+$AzureVM = Add-AzureRmVMNetworkInterface `
+    -VM $AzureVM `
+    -Id $nic.Id
+
+$blobPath = "vhds/WindowsVMosDisk.vhd"
+$osDiskUri = $StorageAccount.PrimaryEndpoints.Blob.ToString() + $blobPath
+
+$diskName = "azurelabarkiaasvm01disk01"
+$AzureVM = Set-AzureRmVMOSDisk `
+    -VM $AzureVM `
+    -Name $diskName `
+    -VhdUri $osDiskUri `
+    -CreateOption FromImage
+
+New-AzureRmVM -ResourceGroupName $resourceGroup.ResourceGroupName -Location $resourceGroup.Location -VM $AzureVM
+}
+
+
+## Enable IaaS Back-up
+{ 
+$backupvault = New-AzureRmRecoveryServicesVault `
+    -Name $vaultname `
+    -ResourceGroupName $resourceGroup.ResourceGroupName `
+    -Location $resourceGroup.Location
+
+Set-AzureRmRecoveryServicesBackupProperties `
+    -Vault $backupvault `
+    -BackupStorageRedundancy GeoRedundant # LocallyRedundant or GeoRedundant
+
+Get-AzureRmRecoveryServicesVault -Name $vaultname | Set-AzureRmRecoveryServicesVaultContext
+
+$RetentionPolicy = Get-AzureRmRecoveryServicesBackupRetentionPolicyObject -WorkloadType AzureVM
+#$SchedulePolicy = Get-AzureRmRecoveryServicesBackupRetentionPolicyObject -WorkloadType AzureVM
+$SchedulePolicy = $RetentionPolicy
+
+$RetentionPolicy.IsDailyScheduleEnabled = 1
+$RetentionPolicy.DailySchedule.DurationCountInDays = 7
+$RetentionPolicy.IsWeeklyScheduleEnabled = 1
+$RetentionPolicy.WeeklySchedule.DurationCountInWeeks = 4
+$RetentionPolicy.IsMonthlyScheduleEnabled = 1
+$RetentionPolicy.MonthlySchedule.DurationCountInMonths = 6
+$RetentionPolicy.IsYearlyScheduleEnabled = 1
+$RetentionPolicy.YearlySchedule.DurationCountInYears = 1
+}
