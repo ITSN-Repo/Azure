@@ -1,0 +1,686 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    //Invul veld voor de klantnaam
+    "customerName": {
+      "type": "string",
+      "minLength": 3,
+      "metadata": {
+        "description": "Give the name of the of the customer (minimum number of characters)"
+      }
+    },
+    //Invul veld voor het domein naam wat gebruikt gaat worden tijden installatie
+    "domainName": {
+      "type": "string",
+      "minLength": 1,
+      "defaultValue": "yourDomain.local",
+      "metadata": {
+        "description": "Which domain name do you want to create"
+      }
+    },
+    //Azure Admin account voor de Azure machines
+    "adminUsername": {
+      "type": "string",
+      "minLength": 1,
+      "defaultValue": "admin.azure",//Standaard waarde voor het admin account
+      "metadata": {
+        "description": "Giva a Administrator username for this Azure Virtual Machine"
+      }
+    },
+    //Azure Admin wachtwoord voor de Azure machines
+    "adminPassword": {
+      "type": "securestring",
+      "minLength": 1,
+      "defaultValue": "Pa$$w0rd4@zur3!", //Standaard waarde van het wachtwoord
+      "metadata": {
+        "description": "Giva a password for the Administrator of this Azure Virtual Machine"
+      }
+    },
+    //Invul veld voor het aantal RDS Host wat wordt deployed
+    "numberOfRdshInstances": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "How many Remote Desktop Session Host do you want to deploy"
+      }
+    },
+    //De Azure size van de RDS Hosts
+    "rdshVmSize": {
+      "type": "string",
+      "allowedValues": [
+        "Standard_DS2_v2",
+        "Standard_DS3_v2",
+        "Standard_DS11_v2",
+        "Standard_DS12_v2"
+      ],
+      "metadata": {
+        "description": "Which VM size do you want to choose for the Remote Desktop Session Host"
+      }
+    }
+  },
+  "variables": {
+    "customerName": "[toUpper(substring(parameters('CustomerName'), 0, 3))]", //In deze variable worden de eerste drie karakters van de klantnaam in hoofdletter opgeslagen
+    "vmName-AZSWDOM01": "[concat(variables('customerName'), 'AZSWDOM01')]", //Machine naam bestaande uit de eerste drie karaters van de klantnaaam gevolgd door AZSWDOM01 
+    "vmName-AZSWGW01": "[concat(variables('customerName'), 'AZSWGW01')]", //Machine naam bestaande uit de eerste drie karaters van de klantnaaam gevolgd door AZSWGW01
+    "vmName-AZSWRDSH": "[concat(variables('customerName'), 'AZSWRDSH')]", //Machine naam bestaande uit de eerste drie karaters van de klantnaaam gevolgd door AZSWRDSH
+    "vNIC-AZSWDOM01": "[concat('vNIC-', variables('vmName-AZSWDOM01'))]", //NIC naam voor de AZSWDOM01 
+    "vNIC-AZSWGW01": "[concat('vNIC-',variables('vmName-AZSWGW01'))]", //NIC naam voor de AZSWGW01
+    "vNIC-AZSWRDSH": "[concat('vNIC-', variables('vmName-AZSWRDSH'))]", //NIC naam voor de AZSWRDSH
+    "vNIC-AZSWDOM01-Identifier": "[concat(resourceId('Microsoft.Network/networkInterfaces', variables('vNIC-AZSWDOM01')))]",//Azure Identifier voor de vNIC-AZSWDOM01 
+    "vNIC-AZSWGW01-Identifier": "[concat(resourceId('Microsoft.Network/networkInterfaces', variables('vNIC-AZSWGW01')))]", //Azure Identifier voor de vNIC-AZSWDOM01
+    "OSDisk-AZSWDOM01": "[concat('OSDisk-', variables('vmName-AZSWDOM01'))]", //Naam OS disk voor de AZSWDOM01
+    "Data-Disk1-AZSWDOM01": "[concat('Data-Disk1-', variables('vmName-AZSWDOM01'))]", //Naam van de data disk voor 
+    "OSDISK-AZSWGW01": "[concat('OSDiks-', variables('vmName-AZSWGW01'))]", //Naam OS disk voor de AZSWGW01
+    "OSDisk-AZSWRDSH": "[concat('OSDiks-', variables('vmName-AZSWRDSH'))]", //Naam OS disk voor de AZSWRDSH
+    "vnetAddressRange": "10.0.0.0/16",
+    "FrontEnd-Subnet": "10.0.1.0/24",
+    "BackEnd-Subnet": "10.0.2.0/24",
+    "NSG-FE": "NGS-FrontEnd-Subnet", //Naam van de Network Security Group
+    "NSG-FE-Identifier": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('NSG-FE'))]",
+    "NSG-BE": "NSG-BackEnd-Subnet", //Naam van de Network Security Group
+    "NSG-BE-Identifier": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('NSG-BE'))]",
+    "externIPAddress": "[concat('PIP-' ,variables('vmName-AZSWGW01'))]",
+    "vSwitch01-Name": "[concat(variables('customerName'), 'AZNWSWC01')]",
+    "vSwitchID": "[concat(resourceId('Microsoft.Network/virtualNetworks', variables('vSwitch01-Name')))]",
+    "FrontEnd-Subnet-Identifier": "[concat(resourceId('Microsoft.Network/virtualNetworks', variables('vSwitch01-Name')),'/subnets/', 'FrontEnd-Subnet')]",
+    "BackEnd-Subnet-Identifier": "[concat(resourceId('Microsoft.Network/virtualNetworks', variables('vSwitch01-Name')),'/subnets/', 'BackEnd-Subnet')]",
+    "imagePublisher": "MicrosoftWindowsServer",
+    "imageOffer": "WindowsServer", 
+    "imageSKU": "2016-Datacenter", //OS voor alle machines
+    "vmSize": "Standard_A2m_v2", //Azure VM size van de AZSWDOM01 en de AZSWGW01
+    "GitHubLocation": "https://raw.githubusercontent.com/Ralph101/ITSN.Azure.Powershell.DSC/master/Project-RDSH/vm101-Config.zip" //GitHub locatie van het Powershell DSC script
+  },
+  "resources": [
+    ////
+    // Extern Public IP resource aanmaken met een statische toewijzing
+    ////
+    {
+      "name": "[variables('externIPAddress')]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2016-03-30",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "publicIPAllocationMethod": "Static" //Methode voor toewijzing van het IP Statisch/Dynamisch
+      }
+    },
+    ////
+    // Network Security Group voor het FrontEnd Subnet
+    ////
+    {
+      "name": "[variables('NSG-FE')]",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2017-03-01",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "enable_dns_rule",
+            "properties": {
+              "description": "Enable Internal DNS",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "destinationAddressPrefix": "10.0.2.250",
+              "access":"Allow",
+              "priority": 100,
+              "direction":"Inbound"
+            }
+          },
+          {
+            "name": "enable_rdp_rule",
+            "properties": {
+              "description": "Allow RDP",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "3389",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound"
+              }
+          },
+          {
+            "name": "deny_internet_rule",
+            "properties": {
+              "description": "Isolate the VNet from the Internet",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "Internet",
+              "destinationAddressPrefix": "VirtualNetwork",
+              "access": "Deny",
+              "priority": 120,
+              "direction": "Inbound"
+              }
+          },
+          {
+            "name": "deny_frontend_rule",
+            "properties": {
+              "description": "Isolate the [variables('FrontEnd-Subnet')] subnet from the [variables('BackEnd-Subnet')] subnet",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "[variables('FrontEnd-Subnet')]",
+              "destinationAddressPrefix": "[variables('BackEnd-Subnet')]",
+              "access": "Deny",
+              "priority": 130,
+              "direction": "Inbound"
+              }
+          }
+        ]
+      }
+    },
+    ////
+    // Network Security Group voor het BackEnd Subnet
+    ////
+    {
+      "name": "[variables('NSG-BE')]",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2015-05-01-preview",
+      "location": "[resourceGroup().location]",
+      "properties": {
+                "securityRules": [
+          {
+            "name": "enable_dns_rule",
+            "properties": {
+              "description": "Enable Internal DNS",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "destinationAddressPrefix": "10.0.2.250",
+              "access":"Allow",
+              "priority": 100,
+              "direction":"Inbound"
+            }
+          },
+          {
+            "name": "enable_powershell_remoting",
+            "properties": {
+              "description": "Allow Powershell Remoting (HTTP)",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "5985",
+              "sourceAddressPrefix": "VirtualNetwork",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 110,
+              "direction": "Inbound"
+              }
+          },
+                    {
+            "name": "enable_rdp_rule",
+            "properties": {
+              "description": "Allow RDP",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "3389",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*",
+              "access": "Allow",
+              "priority": 120,
+              "direction": "Inbound"
+              }
+          },
+          {
+            "name": "deny_internet_rule",
+            "properties": {
+              "description": "Isolate the VNet from the Internet",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "Internet",
+              "destinationAddressPrefix": "VirtualNetwork",
+              "access": "Deny",
+              "priority": 130,
+              "direction": "Inbound"
+              }
+          },
+          {
+            "name": "deny_frontend_rule",
+            "properties": {
+              "description": "Isolate the [variables('FrontEnd-Subnet')] subnet from the [variables('BackEnd-Subnet')] subnet",
+              "protocol": "*",
+              "sourcePortRange": "*",
+              "destinationPortRange": "*",
+              "sourceAddressPrefix": "[variables('FrontEnd-Subnet')]",
+              "destinationAddressPrefix": "[variables('BackEnd-Subnet')]",
+              "access": "Deny",
+              "priority": 140,
+              "direction": "Inbound"
+              }
+          }
+        ]
+      }
+    },
+    ////
+    // vSwitch aanmaken voor de Azure omgeving
+    ////
+    {
+      "name": "[variables('vSwitch01-Name')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2016-03-30",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        //vSwitch wordt alleen gemaakt als onderstaande Resources aanwezig zijn
+        "[variables('NSG-FE-Identifier')]", //NSG-FrontEnd
+        "[variables('NSG-BE-Identifier')]"  //NSG-BackEnd
+        ],
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[variables('vnetAddressRange')]" //Master subnet voor de Azure omgeving
+          ]
+        },
+        "subnets": [
+          // Hier worden de aantal subnetten bepaald die binnen de omgeving worden gebruikt
+          {
+            //Subnet voor de FrontEnd machines (AZSWGW01)
+            "name": "FrontEnd-Subnet",
+            "properties": {
+              "addressPrefix": "[variables('FrontEnd-Subnet')]", //IPv4 Subnet informatie
+              "networkSecurityGroup": {
+                  
+              }
+            }
+          },
+          {
+            //Subnet voor de BackEnd machines (AZSWDOM + AZSWRDSH)
+            "name": "BackEnd-Subnet",
+            "properties": {
+              "addressPrefix": "[variables('BackEnd-Subnet')]" //IPv4 Subnet informatie
+            }
+          }
+        ]
+      }
+    },
+    ////
+    // Netwerk-kaart aanmaken voor de AZSWDOM01 AzureVM
+    ////
+    {
+      "name": "[variables('vNIC-AZSWDOM01')]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2016-03-30",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        //vNIC wordt alleen gemaakt als onderstaande Resources aanwezig zijn
+        "[variables('vSwitchID')]" //vSwitch Azure Identifier
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ip-configuration",
+            "properties": {
+              "privateIPAddress": "10.0.2.254", //IP adres van de AzureVM
+              "privateIPAllocationMethod": "Static", //Methode toewijzing van het IP adres Statisch/Dynamisch
+              "privateIPAddressVersion": "IPv4", //Versie van IP (IPv4/IPv6)
+              "subnet": {
+                "id": "[variables('BackEnd-Subnet-Identifier')]" //Toewijzing in welk subnet de machine staat
+              }
+            }
+          }
+        ]
+      }
+    },
+    ////
+    // Netwerk-kaart aanmaken voor de AZSWGW01 AzureVM
+    ////
+    {
+      "name": "[variables('vNIC-AZSWGW01')]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2016-03-30",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        //vNIC wordt alleen gemaakt als onderstaande Resources aanwezig zijn
+        "[variables('vSwitchID')]" //vSwitch Azure Identifier
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ip-configuration",
+            "properties": {
+              "privateIPAddress": "10.0.1.254", //IP adres van de AzureVM
+              "privateIPAllocationMethod": "Static", //Methode toewijzing van het IP adres Statisch/Dynamisch
+              "privateIPAddressVersion": "IPv4", //Versie van IP (IPv4/IPv6)
+              "publicIPAddress": {
+                "id": "[concat(resourceId('Microsoft.Network/publicIPAddresses', variables('externIPAddress')))]" //Hiermee wordt het Public IP Resource gekoppeld aan deze netwerk-kaart
+              },
+              "subnet": {
+                "id": "[variables('FrontEnd-Subnet-Identifier')]" //Toewijzing in welk subnet de machine staat
+              }
+            }
+          }
+        ]
+      }
+    },
+    ////
+    // Netwerk-kaart aanmaken voor de AZSWRDSH AzureVM's, door middel van een copy loop afhankelijk van het aantal RDSH's
+    ////
+    {
+      "name": "[concat(variables('vNIC-AZSWRDSH'), copyindex())]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2016-03-30",
+      "location": "[resourceGroup().location]",
+      "copy": {
+        //Het aantal vNIC's aanmaken voor de RDSH
+        "name": "rdsh-nic-loop",
+        "count": "[parameters('numberOfRdshInstances')]"
+      },
+      "dependsOn": [
+        //vNIC wordt alleen gemaakt als onderstaande Resources aanwezig zijn
+        "[variables('vSwitchID')]" //vSwitch Azure Identifier
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ip-configuration",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic", //Toewijzing van IP wordt gedaan door Azure DHCP
+              "privateIPAddressVersion": "IPv4", //Versie van IP (IPv4/IPv6)
+              "subnet": {
+                "id": "[variables('BackEnd-Subnet-Identifier')]" //Toewijzing in welk subnet de machine staat
+              }
+            }
+          }
+        ]
+      }
+    },
+    ////
+    // Aanmaken Managed Disk voor de AZSWDOM01 als Data disk 32GB groot 
+    ////
+    {
+      "type": "Microsoft.Compute/disks",
+      "name": "[variables('Data-Disk1-AZSWDOM01')]",
+      "apiVersion": "2016-04-30-preview",
+      "location": "[resourceGroup().location]",
+      "properties":{
+        "creationData": {
+            "createOption": "Empty" //Disk wordt leeg aangemaakt
+            },
+        "accountType": "Standard_LRS", //Methode van opslag binnen Azure LRS/GRS/ZRS/RA-GRS
+        "diskSizeGB": 32 //Grootte van de disk
+        }
+    },
+    ////
+    // Aanmaken Azure VM Remote Desktop Broker/ADDS/DNS Machine
+    //// 
+    {
+      "name": "[variables('vmName-AZSWDOM01')]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2016-04-30-preview",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        //De AzureVM wordt alleen gemaakt als onderstaande Resources aanwezig zijn
+        "[variables('vNIC-AZSWDOM01-Identifier')]" //vNIC voor deze AzureVM
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[variables('vmSize')]" //AzureVM size
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('imagePublisher')]",
+            "offer": "[variables('imageOffer')]",
+            "sku": "[variables('imageSKU')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            //OS disk o.b.v. een Managed Disk
+            "osType": "Windows",
+            "caching": "ReadWrite",
+            "createOption": "FromImage",
+            "name": "[variables('OSDisk-AZSWDOM01')]",
+            "managedDisk": {
+              "storageAccountType": "Standard_LRS"
+              }
+            },
+          "dataDisks": [{
+            "lun": 0,
+            "managedDisk": {
+              "id": "[resourceId('Microsoft.Compute/disks', variables('Data-Disk1-AZSWDOM01'))]" //Koppelen van de extra data disk als Managed Disk
+              },
+            "caching": "None", //Caching is uitgeschakeld, hierop wordt namelijk de ADDS NTDS in opgeslagen
+            "createOption": "Attach"
+          }]
+          },
+        "osProfile": {
+          "computerName": "[variables('vmName-AZSWDOM01')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]"
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[variables('vNIC-AZSWDOM01-Identifier')]", //Koppelen van de vNIC aan de AzureVM
+              "properties": {
+                "primary": true
+              }
+            }
+          ]
+        }
+      },
+      "resources": [
+        ////
+        // Aanmaken van een AzureVM extensie om een Powershell DSC script automatisch te starten
+        ////
+        {
+          "apiVersion": "2016-04-30-preview",
+          "dependsOn": [
+            "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName-AZSWDOM01'))]"
+          ],
+          "location": "[resourceGroup().location]",
+          "name": "xConfig", //Dit is de naam van de Powershell DSC Extension
+          "type":"extensions",
+          "properties": {
+            "publisher": "Microsoft.Powershell",
+            "type": "DSC",
+            "typeHandlerVersion": "2.26",
+            "autoUpgradeMinorVersion": true,
+            "settings": {
+              "modulesUrl": "[variables('GitHubLocation')]", //Locatie van het Powershell DSC script is GitHub
+              "configurationFunction": "vm101-Config.ps1\\xConfig", //Aanroepen van het script en welke module het script moeten gaan starten
+              "wmfVersion": "latest",
+              "Properties": {
+                //Dit zijn variablen die door worden gegeven aan het Powershell DSC script
+                "domainName": "[parameters('domainName')]",
+                "adminCreds": {
+                  "UserName": "[parameters('adminUsername')]",
+                  "Password": "PrivateSettingsRef:AdminPassword"
+                },
+                "ConnectionBroker": "[concat(variables('vmName-AZSWDOM01'),'.',parameters('domainName'))]",
+                "WebAccessServer": "[concat(variables('vmName-AZSWGW01'),'.',parameters('domainName'))]",
+                "numberOfRdshInstances": "[parameters('numberOfRdshInstances')]",
+                "sessionHostNamingPrefix": "[variables('vmName-AZSWRDSH')]"
+              }
+            },
+            //Dit is een secure sting die wordt doorgezet naar het Powershell DSC script
+            "protectedSettings": {
+              "Items": {
+                "AdminPassword": "[parameters('adminPassword')]"
+              }
+            }
+          }
+        }
+      ]
+    },
+    ////
+    // Aanmaken Azure VM Remote Desktop Gateway Machine
+    ////
+    {
+      "name": "[variables('vmName-AZSWGW01')]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2016-04-30-preview",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[variables('vNIC-AZSWGW01-Identifier')]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[variables('vmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('imagePublisher')]",
+            "offer": "[variables('imageOffer')]",
+            "sku": "[variables('imageSKU')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "osType": "Windows",
+            "caching": "ReadWrite",
+            "createOption": "FromImage",
+            "name": "[variables('OSDisk-AZSWGW01')]",
+            "managedDisk": {
+              "storageAccountType": "Standard_LRS"
+              }
+            }
+          },
+        "osProfile": {
+          "computerName": "[variables('vmName-AZSWGW01')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]"
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[variables('vNIC-AZSWGW01-Identifier')]",
+              "properties": {
+                "primary": true
+              }
+            }
+          ]
+        }
+      },
+      "resources": [
+        {
+          "apiVersion": "2016-04-30-preview",
+          "dependsOn": [
+            "[resourceId('Microsoft.Compute/virtualMachines', variables('vmName-AZSWGW01'))]"
+          ],
+          "location": "[resourceGroup().location]",
+          "name": "xGateway",
+          "type":"extensions",
+          "properties": {
+            "publisher": "Microsoft.Powershell",
+            "type": "DSC",
+            "typeHandlerVersion": "2.26",
+            "autoUpgradeMinorVersion": true,
+            "settings": {
+              "modulesUrl": "[variables('GitHubLocation')]",
+              "configurationFunction": "vm101-Config.ps1\\xConfig",
+              "wmfVersion": "latest",
+              "Properties": {
+                "domainName": "[parameters('domainName')]",
+                "adminCreds": {
+                  "UserName": "[parameters('adminUsername')]",
+                  "Password": "PrivateSettingsRef:AdminPassword"
+                },
+                "ConnectionBroker": "[concat(variables('vmName-AZSWDOM01'),'.',parameters('domainName'))]",
+                "WebAccessServer": "[concat(variables('vmName-AZSWGW01'),'.',parameters('domainName'))]",
+                "numberOfRdshInstances": "[parameters('numberOfRdshInstances')]",
+                "sessionHostNamingPrefix": "[variables('vmName-AZSWRDSH')]"
+
+              }
+            },
+            "protectedSettings": {
+              "Items": {
+                "AdminPassword": "[parameters('adminPassword')]"
+              }
+            }
+          }
+        }      
+      ]
+    },
+    ////
+    // Aanmaken Azure VM Remote Desktop Hosts door middel van een copy loop
+    ////
+    {
+      "name": "[concat(variables('vmName-AZSWRDSH'), copyindex())]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2016-04-30-preview",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[concat('Microsoft.Network/networkInterfaces/', variables('vNIC-AZSWRDSH'), copyindex())]",
+        "[concat('Microsoft.Compute/virtualMachines/', variables('vmName-AZSWGW01'),'/extensions/xGateway')]"
+      ],
+      "copy": {
+        "name": "rdsh-vm-loop",
+        "count": "[parameters('numberOfRdshInstances')]"
+      },
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('rdshVmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[variables('imagePublisher')]",
+            "offer": "[variables('imageOffer')]",
+            "sku": "[variables('imageSKU')]",
+            "version": "latest"
+          },
+          "osDisk": {
+            "osType": "Windows",
+            "caching": "ReadWrite",
+            "createOption": "FromImage",
+            "name": "[concat(variables('OSDisk-AZSWRDSH'), copyindex())]",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS"
+              }
+            }
+          },
+        "osProfile": {
+          "computerName": "[concat(variables('vmName-AZSWRDSH'), copyindex())]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]"
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat(variables('vNIC-AZSWRDSH'), copyindex()))]",
+              "properties": {
+                "primary": true
+              }
+            }
+          ]
+        }
+      },
+      "resources": [
+        {
+          "apiVersion": "2016-04-30-preview",
+          "dependsOn": [
+            "[concat('Microsoft.Compute/virtualMachines/', variables('vmName-AZSWRDSH'), copyindex())]"
+          ],
+          "location": "[resourceGroup().location]",
+          "name": "xSessionHost",
+          "type":"extensions",
+          "properties": {
+            "publisher": "Microsoft.Powershell",
+            "type": "DSC",
+            "typeHandlerVersion": "2.26",
+            "autoUpgradeMinorVersion": true,
+            "settings": {
+              "modulesUrl": "[variables('GitHubLocation')]",
+              "configurationFunction": "vm101-Config.ps1\\xSessionHost",
+              "wmfVersoin": "lastest",             
+              "Properties": {
+                "domainName": "[parameters('domainName')]",
+                "adminCreds": {
+                  "UserName": "[parameters('adminUsername')]",
+                  "Password": "PrivateSettingsRef:AdminPassword"
+                }
+              }
+            },
+            "protectedSettings": {
+              "Items": {
+                "AdminPassword": "[parameters('adminPassword')]"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
